@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
+# coding: utf-8
 
 from __future__ import unicode_literals
 
@@ -42,6 +42,7 @@ from .compat import (
     compat_html_entities_html5,
     compat_http_client,
     compat_kwargs,
+    compat_os_name,
     compat_parse_qs,
     compat_shlex_quote,
     compat_socket_create_connection,
@@ -91,6 +92,13 @@ ENGLISH_MONTH_NAMES = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December']
 
+MONTH_NAMES = {
+    'en': ENGLISH_MONTH_NAMES,
+    'fr': [
+        'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+        'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
+}
+
 KNOWN_EXTENSIONS = (
     'mp4', 'm4a', 'm4p', 'm4b', 'm4r', 'm4v', 'aac',
     'flv', 'f4v', 'f4a', 'f4b',
@@ -122,6 +130,7 @@ DATE_FORMATS = (
     '%Y %m %d',
     '%Y-%m-%d',
     '%Y/%m/%d',
+    '%Y/%m/%d %H:%M',
     '%Y/%m/%d %H:%M:%S',
     '%Y-%m-%d %H:%M:%S',
     '%Y-%m-%d %H:%M:%S.%f',
@@ -133,6 +142,8 @@ DATE_FORMATS = (
     '%Y-%m-%dT%H:%M:%S',
     '%Y-%m-%dT%H:%M:%S.%f',
     '%Y-%m-%dT%H:%M',
+    '%b %d %Y at %H:%M',
+    '%b %d %Y at %H:%M:%S',
 )
 
 DATE_FORMATS_DAY_FIRST = list(DATE_FORMATS)
@@ -765,6 +776,26 @@ class ContentTooShortError(Exception):
         # Both in bytes
         self.downloaded = downloaded
         self.expected = expected
+
+
+class XAttrMetadataError(Exception):
+    def __init__(self, code=None, msg='Unknown error'):
+        super(XAttrMetadataError, self).__init__(msg)
+        self.code = code
+        self.msg = msg
+
+        # Parsing code and msg
+        if (self.code in (errno.ENOSPC, errno.EDQUOT) or
+                'No space left' in self.msg or 'Disk quota excedded' in self.msg):
+            self.reason = 'NO_SPACE'
+        elif self.code == errno.E2BIG or 'Argument list too long' in self.msg:
+            self.reason = 'VALUE_TOO_LONG'
+        else:
+            self.reason = 'NOT_SUPPORTED'
+
+
+class XAttrUnavailableError(Exception):
+    pass
 
 
 def _create_http_connection(ydl_handler, http_class, is_https, *args, **kwargs):
@@ -1503,38 +1534,63 @@ def parse_filesize(s):
     _UNIT_TABLE = {
         'B': 1,
         'b': 1,
+        'bytes': 1,
         'KiB': 1024,
         'KB': 1000,
         'kB': 1024,
         'Kb': 1000,
+        'kb': 1000,
+        'kilobytes': 1000,
+        'kibibytes': 1024,
         'MiB': 1024 ** 2,
         'MB': 1000 ** 2,
         'mB': 1024 ** 2,
         'Mb': 1000 ** 2,
+        'mb': 1000 ** 2,
+        'megabytes': 1000 ** 2,
+        'mebibytes': 1024 ** 2,
         'GiB': 1024 ** 3,
         'GB': 1000 ** 3,
         'gB': 1024 ** 3,
         'Gb': 1000 ** 3,
+        'gb': 1000 ** 3,
+        'gigabytes': 1000 ** 3,
+        'gibibytes': 1024 ** 3,
         'TiB': 1024 ** 4,
         'TB': 1000 ** 4,
         'tB': 1024 ** 4,
         'Tb': 1000 ** 4,
+        'tb': 1000 ** 4,
+        'terabytes': 1000 ** 4,
+        'tebibytes': 1024 ** 4,
         'PiB': 1024 ** 5,
         'PB': 1000 ** 5,
         'pB': 1024 ** 5,
         'Pb': 1000 ** 5,
+        'pb': 1000 ** 5,
+        'petabytes': 1000 ** 5,
+        'pebibytes': 1024 ** 5,
         'EiB': 1024 ** 6,
         'EB': 1000 ** 6,
         'eB': 1024 ** 6,
         'Eb': 1000 ** 6,
+        'eb': 1000 ** 6,
+        'exabytes': 1000 ** 6,
+        'exbibytes': 1024 ** 6,
         'ZiB': 1024 ** 7,
         'ZB': 1000 ** 7,
         'zB': 1024 ** 7,
         'Zb': 1000 ** 7,
+        'zb': 1000 ** 7,
+        'zettabytes': 1000 ** 7,
+        'zebibytes': 1024 ** 7,
         'YiB': 1024 ** 8,
         'YB': 1000 ** 8,
         'yB': 1024 ** 8,
         'Yb': 1000 ** 8,
+        'yb': 1000 ** 8,
+        'yottabytes': 1000 ** 8,
+        'yobibytes': 1024 ** 8,
     }
 
     return lookup_unit_table(_UNIT_TABLE, s)
@@ -1561,11 +1617,13 @@ def parse_count(s):
     return lookup_unit_table(_UNIT_TABLE, s)
 
 
-def month_by_name(name):
+def month_by_name(name, lang='en'):
     """ Return the number of a month by (locale-independently) English name """
 
+    month_names = MONTH_NAMES.get(lang, MONTH_NAMES['en'])
+
     try:
-        return ENGLISH_MONTH_NAMES.index(name) + 1
+        return month_names.index(name) + 1
     except ValueError:
         return None
 
@@ -2029,14 +2087,14 @@ def js_to_json(code):
             }.get(m.group(0), m.group(0)), v[1:-1])
 
         INTEGER_TABLE = (
-            (r'^0[xX][0-9a-fA-F]+', 16),
-            (r'^0+[0-7]+', 8),
+            (r'^(0[xX][0-9a-fA-F]+)\s*:?$', 16),
+            (r'^(0+[0-7]+)\s*:?$', 8),
         )
 
         for regex, base in INTEGER_TABLE:
             im = re.match(regex, v)
             if im:
-                i = int(im.group(0), base)
+                i = int(im.group(1), base)
                 return '"%d":' % i if v.endswith(':') else '%d' % i
 
         return '"%s"' % v
@@ -2122,7 +2180,7 @@ def mimetype2ext(mt):
         return ext
 
     _, _, res = mt.rpartition('/')
-    res = res.lower()
+    res = res.split(';')[0].strip().lower()
 
     return {
         '3gpp': '3gp',
@@ -2142,6 +2200,7 @@ def mimetype2ext(mt):
         'f4m+xml': 'f4m',
         'hds+xml': 'f4m',
         'vnd.ms-sstr+xml': 'ism',
+        'quicktime': 'mov',
     }.get(res, res)
 
 
@@ -2157,7 +2216,7 @@ def parse_codecs(codecs_str):
         if codec in ('avc1', 'avc2', 'avc3', 'avc4', 'vp9', 'vp8', 'hev1', 'hev2', 'h263', 'h264', 'mp4v'):
             if not vcodec:
                 vcodec = full_codec
-        elif codec in ('mp4a', 'opus', 'vorbis', 'mp3', 'aac'):
+        elif codec in ('mp4a', 'opus', 'vorbis', 'mp3', 'aac', 'ac-3'):
             if not acodec:
                 acodec = full_codec
         else:
@@ -2409,6 +2468,8 @@ def dfxp2srt(dfxp_data):
 
 def cli_option(params, command_option, param):
     param = params.get(param)
+    if param:
+        param = compat_str(param)
     return [command_option, param] if param is not None else []
 
 
@@ -3093,3 +3154,87 @@ def decode_png(png_data):
             current_row.append(color)
 
     return width, height, pixels
+
+
+def write_xattr(path, key, value):
+    # This mess below finds the best xattr tool for the job
+    try:
+        # try the pyxattr module...
+        import xattr
+
+        if hasattr(xattr, 'set'):  # pyxattr
+            # Unicode arguments are not supported in python-pyxattr until
+            # version 0.5.0
+            # See https://github.com/rg3/youtube-dl/issues/5498
+            pyxattr_required_version = '0.5.0'
+            if version_tuple(xattr.__version__) < version_tuple(pyxattr_required_version):
+                # TODO: fallback to CLI tools
+                raise XAttrUnavailableError(
+                    'python-pyxattr is detected but is too old. '
+                    'youtube-dl requires %s or above while your version is %s. '
+                    'Falling back to other xattr implementations' % (
+                        pyxattr_required_version, xattr.__version__))
+
+            setxattr = xattr.set
+        else:  # xattr
+            setxattr = xattr.setxattr
+
+        try:
+            setxattr(path, key, value)
+        except EnvironmentError as e:
+            raise XAttrMetadataError(e.errno, e.strerror)
+
+    except ImportError:
+        if compat_os_name == 'nt':
+            # Write xattrs to NTFS Alternate Data Streams:
+            # http://en.wikipedia.org/wiki/NTFS#Alternate_data_streams_.28ADS.29
+            assert ':' not in key
+            assert os.path.exists(path)
+
+            ads_fn = path + ':' + key
+            try:
+                with open(ads_fn, 'wb') as f:
+                    f.write(value)
+            except EnvironmentError as e:
+                raise XAttrMetadataError(e.errno, e.strerror)
+        else:
+            user_has_setfattr = check_executable('setfattr', ['--version'])
+            user_has_xattr = check_executable('xattr', ['-h'])
+
+            if user_has_setfattr or user_has_xattr:
+
+                value = value.decode('utf-8')
+                if user_has_setfattr:
+                    executable = 'setfattr'
+                    opts = ['-n', key, '-v', value]
+                elif user_has_xattr:
+                    executable = 'xattr'
+                    opts = ['-w', key, value]
+
+                cmd = ([encodeFilename(executable, True)] +
+                       [encodeArgument(o) for o in opts] +
+                       [encodeFilename(path, True)])
+
+                try:
+                    p = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+                except EnvironmentError as e:
+                    raise XAttrMetadataError(e.errno, e.strerror)
+                stdout, stderr = p.communicate()
+                stderr = stderr.decode('utf-8', 'replace')
+                if p.returncode != 0:
+                    raise XAttrMetadataError(p.returncode, stderr)
+
+            else:
+                # On Unix, and can't find pyxattr, setfattr, or xattr.
+                if sys.platform.startswith('linux'):
+                    raise XAttrUnavailableError(
+                        "Couldn't find a tool to set the xattrs. "
+                        "Install either the python 'pyxattr' or 'xattr' "
+                        "modules, or the GNU 'attr' package "
+                        "(which contains the 'setfattr' tool).")
+                else:
+                    raise XAttrUnavailableError(
+                        "Couldn't find a tool to set the xattrs. "
+                        "Install either the python 'xattr' module, "
+                        "or the 'xattr' binary.")
