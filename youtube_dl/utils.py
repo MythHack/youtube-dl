@@ -86,6 +86,11 @@ std_headers = {
 }
 
 
+USER_AGENTS = {
+    'Safari': 'Mozilla/5.0 (X11; Linux x86_64; rv:10.0) AppleWebKit/533.20.25 (KHTML, like Gecko) Version/5.0.4 Safari/533.20.27',
+}
+
+
 NO_DEFAULT = object()
 
 ENGLISH_MONTH_NAMES = [
@@ -123,7 +128,13 @@ DATE_FORMATS = (
     '%d %B %Y',
     '%d %b %Y',
     '%B %d %Y',
+    '%B %dst %Y',
+    '%B %dnd %Y',
+    '%B %dth %Y',
     '%b %d %Y',
+    '%b %dst %Y',
+    '%b %dnd %Y',
+    '%b %dth %Y',
     '%b %dst %Y %I:%M',
     '%b %dnd %Y %I:%M',
     '%b %dth %Y %I:%M',
@@ -132,6 +143,7 @@ DATE_FORMATS = (
     '%Y/%m/%d',
     '%Y/%m/%d %H:%M',
     '%Y/%m/%d %H:%M:%S',
+    '%Y-%m-%d %H:%M',
     '%Y-%m-%d %H:%M:%S',
     '%Y-%m-%d %H:%M:%S.%f',
     '%d.%m.%Y %H:%M',
@@ -164,6 +176,8 @@ DATE_FORMATS_MONTH_FIRST.extend([
     '%m/%d/%y',
     '%m/%d/%Y %H:%M:%S',
 ])
+
+PACKED_CODES_RE = r"}\('(.+)',(\d+),(\d+),'([^']+)'\.split\('\|'\)"
 
 
 def preferredencoding():
@@ -494,7 +508,7 @@ def sanitize_path(s):
     if drive_or_unc:
         norm_path.pop(0)
     sanitized_path = [
-        path_part if path_part in ['.', '..'] else re.sub('(?:[/<>:"\\|\\\\?\\*]|[\s.]$)', '#', path_part)
+        path_part if path_part in ['.', '..'] else re.sub(r'(?:[/<>:"\|\\?\*]|[\s.]$)', '#', path_part)
         for path_part in norm_path]
     if drive_or_unc:
         sanitized_path.insert(0, drive_or_unc + os.path.sep)
@@ -1176,7 +1190,7 @@ def date_from_str(date_str):
         return today
     if date_str == 'yesterday':
         return today - datetime.timedelta(days=1)
-    match = re.match('(now|today)(?P<sign>[+-])(?P<time>\d+)(?P<unit>day|week|month|year)(s)?', date_str)
+    match = re.match(r'(now|today)(?P<sign>[+-])(?P<time>\d+)(?P<unit>day|week|month|year)(s)?', date_str)
     if match is not None:
         sign = match.group('sign')
         time = int(match.group('time'))
@@ -1689,6 +1703,20 @@ def url_basename(url):
     return path.strip('/').split('/')[-1]
 
 
+def base_url(url):
+    return re.match(r'https?://[^?#&]+/', url).group()
+
+
+def urljoin(base, path):
+    if not isinstance(path, compat_str) or not path:
+        return None
+    if re.match(r'^(?:https?:)?//', path):
+        return path
+    if not isinstance(base, compat_str) or not re.match(r'^(?:https?:)?//', base):
+        return None
+    return compat_urlparse.urljoin(base, path)
+
+
 class HEADRequest(compat_urllib_request.Request):
     def get_method(self):
         return 'HEAD'
@@ -1745,7 +1773,7 @@ def parse_duration(s):
     s = s.strip()
 
     days, hours, mins, secs, ms = [None] * 5
-    m = re.match(r'(?:(?:(?:(?P<days>[0-9]+):)?(?P<hours>[0-9]+):)?(?P<mins>[0-9]+):)?(?P<secs>[0-9]+)(?P<ms>\.[0-9]+)?$', s)
+    m = re.match(r'(?:(?:(?:(?P<days>[0-9]+):)?(?P<hours>[0-9]+):)?(?P<mins>[0-9]+):)?(?P<secs>[0-9]+)(?P<ms>\.[0-9]+)?Z?$', s)
     if m:
         days, hours, mins, secs, ms = m.groups()
     else:
@@ -1762,11 +1790,11 @@ def parse_duration(s):
                 )?
                 (?:
                     (?P<secs>[0-9]+)(?P<ms>\.[0-9]+)?\s*s(?:ec(?:ond)?s?)?\s*
-                )?$''', s)
+                )?Z?$''', s)
         if m:
             days, hours, mins, secs, ms = m.groups()
         else:
-            m = re.match(r'(?i)(?:(?P<hours>[0-9.]+)\s*(?:hours?)|(?P<mins>[0-9.]+)\s*(?:mins?\.?|minutes?)\s*)$', s)
+            m = re.match(r'(?i)(?:(?P<hours>[0-9.]+)\s*(?:hours?)|(?P<mins>[0-9.]+)\s*(?:mins?\.?|minutes?)\s*)Z?$', s)
             if m:
                 hours, mins = m.groups()
             else:
@@ -1816,8 +1844,12 @@ def get_exe_version(exe, args=['--version'],
     """ Returns the version of the specified executable,
     or False if the executable is not present """
     try:
+        # STDIN should be redirected too. On UNIX-like systems, ffmpeg triggers
+        # SIGTTOU if youtube-dl is run in the background.
+        # See https://github.com/rg3/youtube-dl/issues/955#issuecomment-209789656
         out, _ = subprocess.Popen(
             [encodeArgument(exe)] + args,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT).communicate()
     except OSError:
         return False
@@ -2071,11 +2103,18 @@ def strip_jsonp(code):
 
 
 def js_to_json(code):
+    COMMENT_RE = r'/\*(?:(?!\*/).)*?\*/|//[^\n]*'
+    SKIP_RE = r'\s*(?:{comment})?\s*'.format(comment=COMMENT_RE)
+    INTEGER_TABLE = (
+        (r'(?s)^(0[xX][0-9a-fA-F]+){skip}:?$'.format(skip=SKIP_RE), 16),
+        (r'(?s)^(0+[0-7]+){skip}:?$'.format(skip=SKIP_RE), 8),
+    )
+
     def fix_kv(m):
         v = m.group(0)
         if v in ('true', 'false', 'null'):
             return v
-        elif v.startswith('/*') or v == ',':
+        elif v.startswith('/*') or v.startswith('//') or v == ',':
             return ""
 
         if v[0] in ("'", '"'):
@@ -2085,11 +2124,6 @@ def js_to_json(code):
                 '\\\n': '',
                 '\\x': '\\u00',
             }.get(m.group(0), m.group(0)), v[1:-1])
-
-        INTEGER_TABLE = (
-            (r'^(0[xX][0-9a-fA-F]+)\s*:?$', 16),
-            (r'^(0+[0-7]+)\s*:?$', 8),
-        )
 
         for regex, base in INTEGER_TABLE:
             im = re.match(regex, v)
@@ -2102,11 +2136,11 @@ def js_to_json(code):
     return re.sub(r'''(?sx)
         "(?:[^"\\]*(?:\\\\|\\['"nurtbfx/\n]))*[^"\\]*"|
         '(?:[^'\\]*(?:\\\\|\\['"nurtbfx/\n]))*[^'\\]*'|
-        /\*.*?\*/|,(?=\s*[\]}])|
+        {comment}|,(?={skip}[\]}}])|
         [a-zA-Z_][.a-zA-Z_0-9]*|
-        \b(?:0[xX][0-9a-fA-F]+|0+[0-7]+)(?:\s*:)?|
-        [0-9]+(?=\s*:)
-        ''', fix_kv, code)
+        \b(?:0[xX][0-9a-fA-F]+|0+[0-7]+)(?:{skip}:)?|
+        [0-9]+(?={skip}:)
+        '''.format(comment=COMMENT_RE, skip=SKIP_RE), fix_kv, code)
 
 
 def qualities(quality_ids):
@@ -2339,11 +2373,18 @@ def _match_one(filter_part, dct):
     m = operator_rex.search(filter_part)
     if m:
         op = COMPARISON_OPERATORS[m.group('op')]
-        if m.group('strval') is not None:
+        actual_value = dct.get(m.group('key'))
+        if (m.group('strval') is not None or
+            # If the original field is a string and matching comparisonvalue is
+            # a number we should respect the origin of the original field
+            # and process comparison value as a string (see
+            # https://github.com/rg3/youtube-dl/issues/11082).
+            actual_value is not None and m.group('intval') is not None and
+                isinstance(actual_value, compat_str)):
             if m.group('op') not in ('=', '!='):
                 raise ValueError(
                     'Operator %s does not support string values!' % m.group('op'))
-            comparison_value = m.group('strval')
+            comparison_value = m.group('strval') or m.group('intval')
         else:
             try:
                 comparison_value = int(m.group('intval'))
@@ -2355,7 +2396,6 @@ def _match_one(filter_part, dct):
                     raise ValueError(
                         'Invalid integer value %r in filter part %r' % (
                             m.group('intval'), filter_part))
-        actual_value = dct.get(m.group('key'))
         if actual_value is None:
             return m.group('none_inclusive')
         return op(actual_value, comparison_value)
@@ -3017,9 +3057,7 @@ def encode_base_n(num, n, table=None):
 
 
 def decode_packed_codes(code):
-    mobj = re.search(
-        r"}\('(.+)',(\d+),(\d+),'([^']+)'\.split\('\|'\)",
-        code)
+    mobj = re.search(PACKED_CODES_RE, code)
     obfucasted_code, base, count, symbols = mobj.groups()
     base = int(base)
     count = int(count)
