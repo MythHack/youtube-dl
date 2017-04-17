@@ -34,6 +34,9 @@ from youtube_dl.utils import (
     find_xpath_attr,
     fix_xml_ampersands,
     get_element_by_class,
+    get_element_by_attribute,
+    get_elements_by_class,
+    get_elements_by_attribute,
     InAdvancePagedList,
     intlist_to_bytes,
     is_html,
@@ -49,9 +52,11 @@ from youtube_dl.utils import (
     parse_filesize,
     parse_count,
     parse_iso8601,
+    pkcs1pad,
     read_batch_urls,
     sanitize_filename,
     sanitize_path,
+    expand_path,
     prepend_extension,
     replace_extension,
     remove_start,
@@ -91,6 +96,8 @@ from youtube_dl.utils import (
 from youtube_dl.compat import (
     compat_chr,
     compat_etree_fromstring,
+    compat_getenv,
+    compat_setenv,
     compat_urlparse,
     compat_parse_qs,
 )
@@ -209,6 +216,18 @@ class TestUtil(unittest.TestCase):
         self.assertEqual(sanitize_path('../../abc'), '..\\..\\abc')
         self.assertEqual(sanitize_path('./abc'), 'abc')
         self.assertEqual(sanitize_path('./../abc'), '..\\abc')
+
+    def test_expand_path(self):
+        def env(var):
+            return '%{0}%'.format(var) if sys.platform == 'win32' else '${0}'.format(var)
+
+        compat_setenv('YOUTUBE_DL_EXPATH_PATH', 'expanded')
+        self.assertEqual(expand_path(env('YOUTUBE_DL_EXPATH_PATH')), 'expanded')
+        self.assertEqual(expand_path(env('HOME')), compat_getenv('HOME'))
+        self.assertEqual(expand_path('~'), compat_getenv('HOME'))
+        self.assertEqual(
+            expand_path('~/%s' % env('YOUTUBE_DL_EXPATH_PATH')),
+            '%s/expanded' % compat_getenv('HOME'))
 
     def test_prepend_extension(self):
         self.assertEqual(prepend_extension('abc.ext', 'temp'), 'abc.temp.ext')
@@ -451,6 +470,9 @@ class TestUtil(unittest.TestCase):
 
     def test_urljoin(self):
         self.assertEqual(urljoin('http://foo.de/', '/a/b/c.txt'), 'http://foo.de/a/b/c.txt')
+        self.assertEqual(urljoin(b'http://foo.de/', '/a/b/c.txt'), 'http://foo.de/a/b/c.txt')
+        self.assertEqual(urljoin('http://foo.de/', b'/a/b/c.txt'), 'http://foo.de/a/b/c.txt')
+        self.assertEqual(urljoin(b'http://foo.de/', b'/a/b/c.txt'), 'http://foo.de/a/b/c.txt')
         self.assertEqual(urljoin('//foo.de/', '/a/b/c.txt'), '//foo.de/a/b/c.txt')
         self.assertEqual(urljoin('http://foo.de/', 'a/b/c.txt'), 'http://foo.de/a/b/c.txt')
         self.assertEqual(urljoin('http://foo.de', '/a/b/c.txt'), 'http://foo.de/a/b/c.txt')
@@ -1101,6 +1123,14 @@ The first line
             ohdave_rsa_encrypt(b'aa111222', e, N),
             '726664bd9a23fd0c70f9f1b84aab5e3905ce1e45a584e9cbcf9bcc7510338fc1986d6c599ff990d923aa43c51c0d9013cd572e13bc58f4ae48f2ed8c0b0ba881')
 
+    def test_pkcs1pad(self):
+        data = [1, 2, 3]
+        padded_data = pkcs1pad(data, 32)
+        self.assertEqual(padded_data[:2], [0, 2])
+        self.assertEqual(padded_data[28:], [0, 1, 2, 3])
+
+        self.assertRaises(ValueError, pkcs1pad, data, 8)
+
     def test_encode_base_n(self):
         self.assertEqual(encode_base_n(0, 30), '0')
         self.assertEqual(encode_base_n(80, 30), '2k')
@@ -1123,6 +1153,32 @@ The first line
 
         self.assertEqual(get_element_by_class('foo', html), 'nice')
         self.assertEqual(get_element_by_class('no-such-class', html), None)
+
+    def test_get_element_by_attribute(self):
+        html = '''
+            <span class="foo bar">nice</span>
+        '''
+
+        self.assertEqual(get_element_by_attribute('class', 'foo bar', html), 'nice')
+        self.assertEqual(get_element_by_attribute('class', 'foo', html), None)
+        self.assertEqual(get_element_by_attribute('class', 'no-such-foo', html), None)
+
+    def test_get_elements_by_class(self):
+        html = '''
+            <span class="foo bar">nice</span><span class="foo bar">also nice</span>
+        '''
+
+        self.assertEqual(get_elements_by_class('foo', html), ['nice', 'also nice'])
+        self.assertEqual(get_elements_by_class('no-such-class', html), [])
+
+    def test_get_elements_by_attribute(self):
+        html = '''
+            <span class="foo bar">nice</span><span class="foo bar">also nice</span>
+        '''
+
+        self.assertEqual(get_elements_by_attribute('class', 'foo bar', html), ['nice', 'also nice'])
+        self.assertEqual(get_elements_by_attribute('class', 'foo', html), [])
+        self.assertEqual(get_elements_by_attribute('class', 'no-such-foo', html), [])
 
 
 if __name__ == '__main__':

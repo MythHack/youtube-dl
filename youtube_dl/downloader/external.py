@@ -6,7 +6,10 @@ import sys
 import re
 
 from .common import FileDownloader
-from ..compat import compat_setenv
+from ..compat import (
+    compat_setenv,
+    compat_str,
+)
 from ..postprocessor.ffmpeg import FFmpegPostProcessor, EXT_TO_OUT_FORMATS
 from ..utils import (
     cli_option,
@@ -270,12 +273,16 @@ class FFmpegFD(ExternalFD):
                 args += ['-rtmp_live', 'live']
 
         args += ['-i', url, '-c', 'copy']
+
+        if self.params.get('test', False):
+            args += ['-fs', compat_str(self._TEST_FILE_SIZE)]
+
         if protocol in ('m3u8', 'm3u8_native'):
             if self.params.get('hls_use_mpegts', False) or tmpfilename == '-':
                 args += ['-f', 'mpegts']
             else:
                 args += ['-f', 'mp4']
-                if (ffpp.basename == 'ffmpeg' and is_outdated_version(ffpp._versions['ffmpeg'], '3.2')) and (not info_dict.get('acodec') or info_dict['acodec'].split('.')[0] in ('aac', 'mp4a')):
+                if (ffpp.basename == 'ffmpeg' and is_outdated_version(ffpp._versions['ffmpeg'], '3.2', False)) and (not info_dict.get('acodec') or info_dict['acodec'].split('.')[0] in ('aac', 'mp4a')):
                     args += ['-bsf:a', 'aac_adtstoasc']
         elif protocol == 'rtmp':
             args += ['-f', 'flv']

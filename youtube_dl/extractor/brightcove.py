@@ -17,6 +17,7 @@ from ..compat import (
 from ..utils import (
     determine_ext,
     ExtractorError,
+    extract_attributes,
     find_xpath_attr,
     fix_xml_ampersands,
     float_or_none,
@@ -109,6 +110,7 @@ class BrightcoveLegacyIE(InfoExtractor):
                 'upload_date': '20140827',
                 'uploader_id': '710858724001',
             },
+            'skip': 'Video gone',
         },
         {
             # playlist with 'videoList'
@@ -191,6 +193,16 @@ class BrightcoveLegacyIE(InfoExtractor):
         # These fields hold the id of the video
         videoPlayer = find_param('@videoPlayer') or find_param('videoId') or find_param('videoID') or find_param('@videoList')
         if videoPlayer is not None:
+            if isinstance(videoPlayer, list):
+                videoPlayer = videoPlayer[0]
+            videoPlayer = videoPlayer.strip()
+            # UUID is also possible for videoPlayer (e.g.
+            # http://www.popcornflix.com/hoodies-vs-hooligans/7f2d2b87-bbf2-4623-acfb-ea942b4f01dd
+            # or http://www8.hp.com/cn/zh/home.html)
+            if not (re.match(
+                    r'^(?:\d+|[\da-fA-F]{8}-?[\da-fA-F]{4}-?[\da-fA-F]{4}-?[\da-fA-F]{4}-?[\da-fA-F]{12})$',
+                    videoPlayer) or videoPlayer.startswith('ref:')):
+                return None
             params['@videoPlayer'] = videoPlayer
         linkBase = find_param('linkBaseURL')
         if linkBase is not None:
@@ -477,12 +489,13 @@ class BrightcoveNewIE(InfoExtractor):
         return urls[0] if urls else None
 
     @staticmethod
-    def _extract_urls(webpage):
+    def _extract_urls(ie, webpage):
         # Reference:
         # 1. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/publish-video.html#setvideoiniframe
-        # 2. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/publish-video.html#setvideousingjavascript
-        # 3. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/embed-in-page.html
-        # 4. https://support.brightcove.com/en/video-cloud/docs/dynamically-assigning-videos-player
+        # 2. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/publish-video.html#tag
+        # 3. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/publish-video.html#setvideousingjavascript
+        # 4. http://docs.brightcove.com/en/video-cloud/brightcove-player/guides/in-page-embed-player-implementation.html
+        # 5. https://support.brightcove.com/en/video-cloud/docs/dynamically-assigning-videos-player
 
         entries = []
 
@@ -491,26 +504,55 @@ class BrightcoveNewIE(InfoExtractor):
                 r'<iframe[^>]+src=(["\'])((?:https?:)?//players\.brightcove\.net/\d+/[^/]+/index\.html.+?)\1', webpage):
             entries.append(url if url.startswith('http') else 'http:' + url)
 
-        # Look for embed_in_page embeds [2]
-        for video_id, account_id, player_id, embed in re.findall(
-                # According to examples from [3] it's unclear whether video id
-                # may be optional and what to do when it is
-                # According to [4] data-video-id may be prefixed with ref:
-                r'''(?sx)
-                    <video[^>]+
-                        data-video-id=["\'](\d+|ref:[^"\']+)["\'][^>]*>.*?
-                    </video>.*?
-                    <script[^>]+
-                        src=["\'](?:https?:)?//players\.brightcove\.net/
-                        (\d+)/([^/]+)_([^/]+)/index(?:\.min)?\.js
+        # Look for <video> tags [2] and embed_in_page embeds [3]
+        # [2] looks like:
+        for video, script_tag, account_id, player_id, embed in re.findall(
+                r'''(?isx)
+                    (<video\s+[^>]+>)
+                    (?:.*?
+                        (<script[^>]+
+                            src=["\'](?:https?:)?//players\.brightcove\.net/
+                            (\d+)/([^/]+)_([^/]+)/index(?:\.min)?\.js
+                        )
+                    )?
                 ''', webpage):
-            entries.append(
-                'http://players.brightcove.net/%s/%s_%s/index.html?videoId=%s'
-                % (account_id, player_id, embed, video_id))
+            attrs = extract_attributes(video)
+
+            # According to examples from [4] it's unclear whether video id
+            # may be optional and what to do when it is
+            video_id = attrs.get('data-video-id')
+            if not video_id:
+                continue
+
+            account_id = account_id or attrs.get('data-account')
+            if not account_id:
+                continue
+
+            player_id = player_id or attrs.get('data-player') or 'default'
+            embed = embed or attrs.get('data-embed') or 'default'
+
+            bc_url = 'http://players.brightcove.net/%s/%s_%s/index.html?videoId=%s' % (
+                account_id, player_id, embed, video_id)
+
+            # Some brightcove videos may be embedded with video tag only and
+            # without script tag or any mentioning of brightcove at all. Such
+            # embeds are considered ambiguous since they are matched based only
+            # on data-video-id and data-account attributes and in the wild may
+            # not be brightcove embeds at all. Let's check reconstructed
+            # brightcove URLs in case of such embeds and only process valid
+            # ones. By this we ensure there is indeed a brightcove embed.
+            if not script_tag and not ie._is_valid_url(
+                    bc_url, video_id, 'possible brightcove video'):
+                continue
+
+            entries.append(bc_url)
 
         return entries
 
     def _real_extract(self, url):
+        url, smuggled_data = unsmuggle_url(url, {})
+        self._initialize_geo_bypass(smuggled_data.get('geo_countries'))
+
         account_id, player_id, embed, video_id = re.match(self._VALID_URL, url).groups()
 
         webpage = self._download_webpage(
@@ -540,8 +582,10 @@ class BrightcoveNewIE(InfoExtractor):
         except ExtractorError as e:
             if isinstance(e.cause, compat_HTTPError) and e.cause.code == 403:
                 json_data = self._parse_json(e.cause.read().decode(), video_id)[0]
-                raise ExtractorError(
-                    json_data.get('message') or json_data['error_code'], expected=True)
+                message = json_data.get('message') or json_data['error_code']
+                if json_data.get('error_subcode') == 'CLIENT_GEO':
+                    self.raise_geo_restricted(msg=message)
+                raise ExtractorError(message, expected=True)
             raise
 
         title = json_data['name'].strip()
